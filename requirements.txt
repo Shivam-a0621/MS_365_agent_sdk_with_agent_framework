@@ -1,0 +1,28 @@
+# Direct dependencies for agent-fastapi.
+# Several are pre-release (.dev*, b*, rc*) — install with `--pre` or use uv:
+#   uv pip install -r requirements.txt
+#   pip install --pre -r requirements.txt
+
+# --- FastAPI app stack ---
+fastapi==0.133.0
+uvicorn==0.47.0
+python-dotenv==1.2.2
+
+# --- Database (async Postgres + migrations) ---
+SQLAlchemy==2.1.0b2
+asyncpg==0.31.0
+alembic==1.18.4
+
+# --- Redis (per-conversation distributed lock) ---
+redis==7.1.1
+
+# --- Microsoft 365 Agents SDK ---
+microsoft-agents-activity==0.10.0.dev3
+microsoft-agents-authentication-msal==0.10.0.dev3
+microsoft-agents-hosting-core==0.10.0.dev3
+microsoft-agents-hosting-aiohttp==0.10.0.dev3
+
+# --- Microsoft Agent Framework (handoff workflow + LLM client) ---
+agent-framework==1.5.0
+agent-framework-openai==1.5.0
+agent-framework-orchestrations==1.0.0rc1
