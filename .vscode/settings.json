@@ -1,0 +1,5 @@
+{
+    // Let the Python debugger step into library code (e.g. microsoft_agents),
+    // not just your own files.
+    "python.debugJustMyCode": false
+}

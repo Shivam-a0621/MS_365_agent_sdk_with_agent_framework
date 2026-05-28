@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+
+# Virtual envs (we keep ours at parent level; be defensive)
+.venv/
+venv/
+env/
+
+# Environment / secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# MCP config carries DATABASE_URI with password inline
+.mcp.json
+
+# IDE / editor
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local SQLite (we use Postgres; defensive)
+*.sqlite
+*.db
