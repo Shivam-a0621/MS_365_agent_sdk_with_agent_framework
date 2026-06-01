@@ -9,10 +9,43 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from agent_framework import ChatContext, ChatMiddleware
+from agent_framework._middleware import FunctionInvocationContext, FunctionMiddleware
 
 logger = logging.getLogger("app.llm_telemetry")
+
+
+class ToolResultCaptureMiddleware(FunctionMiddleware):
+    """Capture each domain-tool result as it executes, so the handoff orchestrator can share it
+    (rendered as text) with the next agent.
+
+    Why this exists: the framework strips tool results when broadcasting between agents, and on the
+    approval-RESUME path a tool's result is consumed as input to the resumed run — so it is NOT in
+    the agent's response messages. Capturing here, at execution time, catches every tool result
+    reliably (normal calls AND post-approval). The handoff executor drains ``results`` right after
+    the agent runs and broadcasts them into the (checkpointed) shared conversation, so this buffer is
+    purely ephemeral per run and never needs persisting. One fresh instance per agent.
+    """
+
+    def __init__(self) -> None:
+        self.results: list[tuple[str, Any]] = []
+
+    async def process(self, context: FunctionInvocationContext, call_next):  # type: ignore[no-untyped-def]
+        await call_next()
+        # Handoff tools are short-circuited by the framework's auto-handoff middleware (raises before
+        # call_next returns), so we never reach here for them; the name guard is a backstop.
+        name = getattr(getattr(context, "function", None), "name", "") or ""
+        if name.startswith("handoff_to_"):
+            return
+        self.results.append((name, getattr(context, "result", None)))
+
+    def drain(self) -> list[tuple[str, Any]]:
+        """Return captured (tool_name, result) pairs since the last drain and reset the buffer."""
+        captured = self.results[:]
+        self.results.clear()
+        return captured
 
 
 class PrintLLMCallMiddleware(ChatMiddleware):

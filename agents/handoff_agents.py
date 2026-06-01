@@ -11,7 +11,11 @@ from __future__ import annotations
 from agent_framework import Agent, MCPStreamableHTTPTool
 from agent_framework.openai import OpenAIChatCompletionClient
 
-from agents.middleware import LlmTelemetryMiddleware, PrintLLMCallMiddleware
+from agents.middleware import (
+    LlmTelemetryMiddleware,
+    PrintLLMCallMiddleware,
+    ToolResultCaptureMiddleware,
+)
 from tools.file_master import list_available_files, read_file, write_file
 from tools.ticket_master import check_existing_tickets, create_ticket
 
@@ -122,7 +126,9 @@ def _role(line: str) -> str:
 def _middleware(
     name: str, chat_conversation_id: int | None, user_message_id: int | None
 ) -> list:
-    mw: list = [PrintLLMCallMiddleware(name)]
+    # ToolResultCaptureMiddleware (fresh per agent) lets ContextAwareHandoffExecutor share this
+    # agent's tool RESULTS as text with the next agent — the gap stock HandoffBuilder leaves.
+    mw: list = [PrintLLMCallMiddleware(name), ToolResultCaptureMiddleware()]
     # Attach LLM telemetry only when running a real turn (ids known). Middleware is
     # not part of the workflow graph signature, so this stays checkpoint-compatible.
     if chat_conversation_id is not None and user_message_id is not None:
