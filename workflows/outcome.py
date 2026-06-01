@@ -35,13 +35,43 @@ def reply_text(data: Any) -> str | None:
 
 
 def extract_replies(result: Any) -> list[str]:
-    """Final outputs of a run as display strings."""
-    replies = []
+    """User-visible replies = the ``send_reply_to_user`` outputs ONLY, in emission order, de-duplicated.
+
+    The framework also yields each agent's implicit ``AgentResponse`` as an ``output`` event; we
+    deliberately skip those — ``send_reply_to_user`` is the sole user-reply channel — so there are no
+    interleaved replies. (Lazy import to avoid any import-order coupling.)
+
+    De-dup safety net: in a handoff mesh a receiving agent sometimes RESTATES a result another agent
+    already reported (it sees the "[other_agent] …" note and parrots it as plain text, which the
+    executor's fallback then surfaces). Identical replies are collapsed by whitespace-normalized text
+    so the user never sees the same answer twice, regardless of how the models route.
+    """
+    from workflows.handoff_orchestrator import UserReply
+
+    replies: list[str] = []
+    seen: set[str] = set()
     for output in result.get_outputs():
-        text = reply_text(output)
-        if text:
-            replies.append(text)
+        if isinstance(output, UserReply) and output.text:
+            key = " ".join(output.text.split())  # normalize whitespace for the comparison only
+            if key in seen:
+                continue
+            seen.add(key)
+            replies.append(output.text)
     return replies
+
+
+def find_tool_result(result: Any, tool_name: str | None) -> str | None:
+    """Return the captured result of the executed tool named ``tool_name`` from this run's
+    ``ToolExecuted`` outputs, or None. Used by the service to write the ``tool_result`` audit row on an
+    approval RESUME (the framework runs the approved tool but does not re-emit its function_result)."""
+    if not tool_name:
+        return None
+    from workflows.handoff_orchestrator import ToolExecuted
+
+    for output in result.get_outputs():
+        if isinstance(output, ToolExecuted) and output.tool == tool_name:
+            return output.result
+    return None
 
 
 def is_function_approval(event: Any) -> bool:

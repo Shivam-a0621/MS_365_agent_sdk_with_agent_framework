@@ -60,6 +60,41 @@ async def record_run(
     handoff_call_ids: set = set()
     call_to_tool: dict = {}  # call_id -> tool name (to label tool_result rows)
     approval_agents: dict = {}  # call_id -> agent that requested the approval
+    recorded_approvals: set = set()  # approval call_ids already written this run
+
+    # An approval-required tool arrives as a function_call AND a function_approval_request with the SAME
+    # call_id on the PAUSE turn. We pre-scan the approval requests so we can record the approval_request
+    # ONLY (skipping its tool_call) on this turn; the service stamps the decision onto that same row and
+    # appends tool_call + tool_result on the RESUME turn. Final actions order:
+    # approval_request(status=approved) -> tool_call -> tool_result.
+    approvals_by_call: dict = {}  # call_id -> (approval content, agent_name)
+    for ev in result:
+        if getattr(ev, "type", None) != "output":
+            continue
+        data = getattr(ev, "data", None)
+        agent_from_event = getattr(ev, "executor_id", None)
+        agent_response = getattr(data, "agent_response", None) or data
+        for msg in getattr(agent_response, "messages", None) or []:
+            agent_name = getattr(msg, "author_name", None) or agent_from_event
+            for content in getattr(msg, "contents", None) or []:
+                if getattr(content, "type", "") == "function_approval_request":
+                    approvals_by_call[getattr(content, "id", None)] = (content, agent_name)
+
+    async def _emit_approval(content: Any, agent_name: Any) -> None:
+        fc = getattr(content, "function_call", None)
+        call_id = getattr(content, "id", None)
+        approval_agents[call_id] = agent_name  # remember the owning agent
+        recorded_approvals.add(call_id)
+        await repo.add_action(
+            session,
+            chat_conversation_id=chat_conversation_id,
+            user_message_id=user_message_id,
+            event_type="approval_request",
+            agent_name=agent_name,
+            tool_name=getattr(fc, "name", None),
+            call_id=call_id,
+            payload={"arguments": _jsonable(getattr(fc, "arguments", None))},
+        )
 
     for ev in result:
         if getattr(ev, "type", None) != "output":
@@ -80,6 +115,7 @@ async def record_run(
                 #   text                       -> aistudiobot_chathistory (role=assistant)
                 #   function_call (handoff_*)  -> aistudiobot_agent_actions (event_type=handoff)
                 #   function_call (other)      -> aistudiobot_agent_actions (event_type=tool_call)
+                #                                 (approval_request emitted FIRST when the call needs it)
                 #   function_result            -> aistudiobot_agent_actions (event_type=tool_result)
                 #                                 (handoff acks skipped via handoff_call_ids)
                 #   function_approval_request  -> aistudiobot_agent_actions (event_type=approval_request)
@@ -119,6 +155,14 @@ async def record_run(
                                 "target": name[len(_HANDOFF_PREFIX) :],
                             },
                         )
+                    elif call_id in approvals_by_call:
+                        # Approval-gated call on the PAUSE turn: record the approval_request ONLY. The
+                        # tool has not run yet — the service stamps this row's status (approved/denied) and
+                        # appends tool_call + tool_result on the RESUME turn, so the audit reads
+                        # approval_request(status=approved) -> tool_call -> tool_result.
+                        if call_id not in recorded_approvals:
+                            ac, an = approvals_by_call[call_id]
+                            await _emit_approval(ac, an)
                     else:
                         call_to_tool[call_id] = name  # remember the name for the tool_result
                         await repo.add_action(
@@ -152,20 +196,10 @@ async def record_run(
                     )
 
                 elif ctype == "function_approval_request":
-                    fc = getattr(content, "function_call", None)
+                    # Usually already emitted just before its tool_call (above); emit here only if
+                    # the approval arrived without a preceding function_call this run.
                     call_id = getattr(content, "id", None)
-                    approval_agents[call_id] = agent_name  # remember the owning agent
-                    await repo.add_action(
-                        session,
-                        chat_conversation_id=chat_conversation_id,
-                        user_message_id=user_message_id,
-                        event_type="approval_request",
-                        agent_name=agent_name,
-                        tool_name=getattr(fc, "name", None),
-                        call_id=call_id,
-                        payload={
-                            "arguments": _jsonable(getattr(fc, "arguments", None))
-                        },
-                    )
+                    if call_id not in recorded_approvals:
+                        await _emit_approval(content, agent_name)
 
     return approval_agents

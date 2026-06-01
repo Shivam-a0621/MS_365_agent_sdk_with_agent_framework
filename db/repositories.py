@@ -180,6 +180,36 @@ async def add_action(
     return row
 
 
+async def update_approval_status(
+    session: AsyncSession,
+    *,
+    chat_conversation_id: int,
+    call_id: str | None,
+    status: str,
+) -> AgentAction | None:
+    """Stamp the decision onto the EXISTING approval_request action (status -> approved/denied) instead
+    of writing a separate approval_decision row. The request row was created on the pause turn; the
+    decision updates it in place on the resume turn (its seq stays first, now carrying the outcome)."""
+    if not call_id:
+        return None
+    row = (
+        await session.execute(
+            select(AgentAction)
+            .where(
+                AgentAction.chat_conversation_id == chat_conversation_id,
+                AgentAction.call_id == call_id,
+                AgentAction.event_type == "approval_request",
+            )
+            .order_by(AgentAction.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is not None:
+        row.status = status
+        await session.flush()
+    return row
+
+
 async def add_llm_call(
     session: AsyncSession,
     *,
@@ -192,6 +222,8 @@ async def add_llm_call(
     total_tokens: int | None,
     finish_reason: str | None,
     latency_ms: int | None,
+    request: dict | None = None,
+    response: dict | None = None,
 ) -> AgentLlmCall:
     row = AgentLlmCall(
         chat_conversation_id=chat_conversation_id,
@@ -203,6 +235,8 @@ async def add_llm_call(
         total_tokens=total_tokens,
         finish_reason=finish_reason,
         latency_ms=latency_ms,
+        request=request,
+        response=response,
     )
     session.add(row)
     await session.flush()

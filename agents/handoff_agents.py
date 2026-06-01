@@ -11,8 +11,13 @@ from __future__ import annotations
 from agent_framework import Agent, MCPStreamableHTTPTool
 from agent_framework.openai import OpenAIChatCompletionClient
 
-from agents.middleware import LlmTelemetryMiddleware, PrintLLMCallMiddleware
+from agents.middleware import (
+    LlmTelemetryMiddleware,
+    PrintLLMCallMiddleware,
+    UserReplyCaptureMiddleware,
+)
 from tools.file_master import list_available_files, read_file, write_file
+from tools.reply import send_reply_to_user
 from tools.ticket_master import check_existing_tickets, create_ticket
 
 # Stable ids — also used as handoff targets.
@@ -78,40 +83,42 @@ WORKFLOW_ANALYZER = "ae_workflow_analyzer"
 HANDOFF_AGENT_RULES = """You are a specialist agent in a multi-agent handoff workflow. Several
 specialists may collaborate to satisfy ONE user request; you handle only your specialty and pass
 the rest on.
- 
-IMPORTANT — HOW AGENTS SHARE INFORMATION:
-The other agents CANNOT see your tool calls or their raw results. They see only the TEXT you write.
-So whatever you write is the only way the next agent (and the user) learns what you did. If you stay
-silent, the next agent is blind and will redo your work or bounce it back to you.
- 
-KNOW WHAT THE REQUEST NEEDS AND WHAT IS ALREADY DONE.
-- Read the user's ORIGINAL request and identify every distinct thing it asks for.
-- Read the earlier assistant messages: each specialist reports its result there (e.g. "Created
-  ticket TKT-1001.", "Files on disk: a.log, b.txt"). Treat anything already reported as DONE — never
-  redo it and never hand a finished part back to the agent that did it.
- 
-DO YOUR OWN PART, FULLY.
-- If a not-yet-done part is in your specialty, do it with your tools. An approval-required tool is
-  normal — just call it; the system pauses for the user automatically.
-- If you are missing a detail you NEED (e.g. a ticket needs a clear subject / department and the
-  user gave none), ask the user ONE specific question and STOP — do NOT invent placeholder values
-  and do NOT hand off. (Different from the forbidden "should I proceed?" — if you already have what
-  you need, just act.)
- 
-REPORT YOUR RESULT — ALWAYS, BEFORE YOU HAND OFF.
-- After your tool succeeds, WRITE the actual result as your message: the data the user asked for
-  (the list of workflows, the files, etc.) or a one-line confirmation naming the artifact ("Created
-  ticket TKT-1001.").
-- This is mandatory: once you have done work, NEVER hand off with an empty message. Do NOT write a
-  checklist or status block, and do NOT narrate the routing ("I'll hand off…", "Next I will…") —
-  just give the result itself, then hand off in the same message if more remains.
- 
-THEN HAND OFF OR FINISH.
-- If any requested part is still not done and it's outside your specialty, call the handoff tool for
-  the specialist who handles it (in the same message as your result).
-- If every requested part is now done, do NOT hand off.
- 
-NEVER SPEAK FOR ANOTHER AGENT, and never claim work that a tool of YOURS didn't actually complete.
+
+HOW THE USER HEARS FROM YOU — THE ONLY CHANNEL:
+The user sees ONLY what you pass to the send_reply_to_user tool. Text you write in your normal reply
+is NOT shown to the user (other specialists may read it, but the user never does). So for every
+sub-task you finish, you MUST call send_reply_to_user once with the user-facing result.
+
+TRACK THE WHOLE SCOPE OF THE REQUEST:
+- Read the user's ORIGINAL request and list every distinct thing it asks for.
+- The earlier assistant messages show what other specialists already reported (e.g. a note like
+  "[file_master] Created custom.log."). Treat anything already reported as DONE — never redo it and
+  never hand a finished part back to the agent that did it.
+
+DO YOUR PART, THEN REPORT, THEN CHECK COMPLETION, THEN HAND OFF OR FINISH — in this order:
+1. If a not-yet-done part is in YOUR specialty, do it with your tools. An approval-required tool is
+   normal — just call it; the system pauses for the user automatically. (If you are missing a detail
+   you NEED — e.g. a ticket subject/department the user never gave — call send_reply_to_user to ask
+   ONE specific question and STOP; do NOT invent placeholders and do NOT hand off.)
+2. IMMEDIATELY after your tool succeeds, call send_reply_to_user(message=...) with the ACTUAL result:
+   the data requested (the list of workflows/files) or a one-line confirmation naming the artifact
+   ("Created file custom.log."). Exactly ONE call per completed sub-task, BEFORE you hand off. This is
+   absolute: the moment a tool returns — ESPECIALLY an approval-required tool that just resumed after
+   the user approved it — your VERY NEXT action MUST be send_reply_to_user with that result. NEVER hand
+   off (or do anything else) before you have reported the result you just got.
+3. STOP AND CHECK COMPLETION before doing anything else. Walk every distinct part of the user's
+   ORIGINAL request and mark each DONE if it is YOUR finished work OR is already reported in an
+   earlier "[other_agent] …" note. If EVERY part is now DONE, you are finished: do NOT call any tool,
+   do NOT hand off, and do NOT restate the results — just stop. (Handing off when nothing is left is
+   what makes the agents bounce back and forth — never do it.)
+4. Only if some part is STILL not done AND it is outside your specialty, call the
+   handoff_to_<specialist> tool for the agent that owns that unfinished part — and hand off to that
+   agent only.
+
+NEVER narrate routing ("I'll hand off…", "Next I will…"). NEVER restate or re-list a result another
+agent already reported in a note — that is THEIR reply, not yours; repeating it just spams the user.
+NEVER call send_reply_to_user for work a tool of YOURS did not actually complete, and never speak for
+another agent.
 """
 
 def _role(line: str) -> str:
@@ -122,7 +129,10 @@ def _role(line: str) -> str:
 def _middleware(
     name: str, chat_conversation_id: int | None, user_message_id: int | None
 ) -> list:
-    mw: list = [PrintLLMCallMiddleware(name)]
+    # UserReplyCaptureMiddleware captures this agent's send_reply_to_user calls; the handoff executor
+    # surfaces each to BOTH the user (a reply) and the next agent (a context note). Fresh per agent;
+    # not part of the workflow graph signature.
+    mw: list = [PrintLLMCallMiddleware(name), UserReplyCaptureMiddleware()]
     # Attach LLM telemetry only when running a real turn (ids known). Middleware is
     # not part of the workflow graph signature, so this stays checkpoint-compatible.
     if chat_conversation_id is not None and user_message_id is not None:
@@ -155,6 +165,7 @@ def build_handoff_agents(
             "You are the entry point. Greet the user and answer generic IT "
             "questions (passwords, accounts, generic how-to) yourself."
         ),
+        tools=[send_reply_to_user],
         middleware=_middleware(TRIAGE, chat_conversation_id, user_message_id),
         require_per_service_call_history_persistence=True,
     )
@@ -167,7 +178,7 @@ def build_handoff_agents(
             "search, and list any file, folder, or log."
         ),
         instructions=_role("You are the file / directory / log specialist on disk."),
-        tools=[read_file, write_file, list_available_files],
+        tools=[read_file, write_file, list_available_files, send_reply_to_user],
         middleware=_middleware(FILE_MASTER, chat_conversation_id, user_message_id),
         require_per_service_call_history_persistence=True,
     )
@@ -180,7 +191,7 @@ def build_handoff_agents(
             "check ticket status, raise incidents."
         ),
         instructions=_role("You are the IT-support ticket specialist."),
-        tools=[check_existing_tickets, create_ticket],
+        tools=[check_existing_tickets, create_ticket, send_reply_to_user],
         middleware=_middleware(TICKET_RAISER, chat_conversation_id, user_message_id),
         require_per_service_call_history_persistence=True,
     )
@@ -199,7 +210,7 @@ def build_handoff_agents(
             'says "workflows" plural without naming one, use the tenant-wide '
             "summary tools — never invent a workflowName."
         ),
-        tools=[ae_mcp],
+        tools=[ae_mcp, send_reply_to_user],
         middleware=_middleware(
             WORKFLOW_ANALYZER, chat_conversation_id, user_message_id
         ),

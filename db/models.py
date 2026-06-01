@@ -218,12 +218,13 @@ class AgentAction(Base):
     )  # shared with aistudiobot_chathistory via aistudiobot_event_seq
     event_type: Mapped[str] = mapped_column(
         String(32)
-    )  # handoff | tool_call | tool_result | approval_request | approval_decision
+    )  # handoff | tool_call | tool_result | approval_request (its status carries the decision)
     agent_name: Mapped[str | None] = mapped_column(String(128))
     tool_name: Mapped[str | None] = mapped_column(String(128))  # create_ticket, handoff_to_x, mcp tool…
     tool_kind: Mapped[str | None] = mapped_column(String(32))  # function | mcp | handoff
     call_id: Mapped[str | None] = mapped_column(String(128))  # correlate call/result/approval
-    status: Mapped[str | None] = mapped_column(String(32))  # called | ok | approved | denied | failed
+    # status on approval_request: null=pending -> approved|denied (stamped in place on resume); ok|failed on results
+    status: Mapped[str | None] = mapped_column(String(32))
     payload: Mapped[dict | None] = mapped_column(JSONB)  # args / result / approval / {source,target}
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

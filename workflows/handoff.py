@@ -1,27 +1,44 @@
-"""Build the IT-support handoff workflow (port of the POC handoff_workflow.py).
+"""Build the IT-support handoff workflow on the context-aware handoff orchestrator.
 
-triage_agent (start) hands off to file_master / ticket_raiser / ae_workflow_analyzer.
+triage_agent (start) hands off to file_master / ticket_raiser / ae_workflow_analyzer via
+``ContextAwareHandoffBuilder`` (``workflows/handoff_orchestrator.py``), which shares each agent's
+tool RESULTS (as text) across handoffs so downstream agents see completed work — and, because it
+reuses the framework's ``HandoffAgentExecutor``, preserves the shared conversation across an approval
+pause+resume (the bug the from-scratch mesh had).
 
-The workflow NAME is unique per conversation (`it_support__{conversation_id}__v{version}`)
-because agent_framework keys checkpoints by workflow_name only — this isolates each
-conversation's checkpoints. The `version` lets us intentionally invalidate stale
-checkpoints when the agent graph changes.
+The workflow NAME is unique per conversation (and per graph version) because agent_framework keys
+checkpoints by ``workflow_name``; bumping ``_GRAPH_VERSION`` invalidates stale checkpoints when the
+agent graph / executor changes.
 """
 
 from __future__ import annotations
 
-from agent_framework import CheckpointStorage, Workflow
-from agent_framework.orchestrations import HandoffBuilder
+from agent_framework import CheckpointStorage, Message, Workflow
 
 from agents.client import build_chat_client
 from agents.handoff_agents import TRIAGE, build_handoff_agents
 from mcps.sse_tool import build_ae_mcp
+from workflows.handoff_orchestrator import ContextAwareHandoffBuilder
 
 WORKFLOW_KIND = "handoff"
 
+# Bumped when the executor/graph changes so stale checkpoints (a different graph signature) are never
+# matched by name. The framework would also reject them via WorkflowCheckpointException, but a fresh
+# name avoids the exception path entirely.
+_GRAPH_VERSION = 3
+
+# Safety net against unbounded agent->agent ping-pong (HITL handoff has no built-in hop limit).
+# Generous because ContextAwareHandoffExecutor also adds tool-result text notes to the conversation.
+MESSAGE_CAP = 40
+
 
 def workflow_name(conversation_id: str | int, workflow_version: int = 1) -> str:
-    return f"it_support__{conversation_id}__v{workflow_version}"
+    return f"it_support__{conversation_id}__v{workflow_version}_g{_GRAPH_VERSION}"
+
+
+def _conversation_cap_reached(conversation: list[Message]) -> bool:
+    """Termination: stop the turn once the shared conversation passes the hop cap."""
+    return len(conversation) > MESSAGE_CAP
 
 
 def build_handoff_workflow(
@@ -40,9 +57,13 @@ def build_handoff_workflow(
     )
     by_name = {a.name: a for a in agents}
 
-    builder = HandoffBuilder(
-        name=workflow_name(conversation_id, workflow_version), participants=agents
-    ).with_start_agent(by_name[TRIAGE])
+    builder = (
+        ContextAwareHandoffBuilder(
+            name=workflow_name(conversation_id, workflow_version), participants=agents
+        )
+        .with_start_agent(by_name[TRIAGE])
+        .with_termination_condition(_conversation_cap_reached)
+    )
     if checkpoint_storage is not None:
         builder = builder.with_checkpointing(checkpoint_storage)
     return builder.build()

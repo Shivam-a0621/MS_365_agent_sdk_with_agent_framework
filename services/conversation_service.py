@@ -24,7 +24,7 @@ from db import repositories as repo
 from db.session import SessionLocal
 from services.locks import conversation_lock
 from workflows.manager import finalize_checkpoints, run_turn
-from workflows.outcome import extract_replies, is_function_approval
+from workflows.outcome import extract_replies, find_tool_result, is_function_approval
 from workflows.recorder import _jsonable, record_run
 
 logger = logging.getLogger("app.conversation")
@@ -201,7 +201,47 @@ async def handle_message(
                 await session.commit()  # leave any open_request intact for retry
                 return TurnResult(error=str(exc), replies=["Sorry, something went wrong. Please try again."])
 
-            # 4. persist transcript + actions from the run events. Assistant
+            # 4. stamp the PREVIOUS approval's outcome onto its existing approval_request row (status ->
+            #    approved/denied) — NOT a separate approval_decision row. Then, only if approved, append
+            #    the tool_call + tool_result for the now-executed tool. Done BEFORE record_run (step 5)
+            #    so the audit reads: approval_request(status=approved) -> tool_call -> tool_result ->
+            #    handoff/reply (seq is assigned at flush time). On deny: just the stamped request row.
+            if open_request is not None and open_request.kind == "function_approval":
+                await repo.update_approval_status(
+                    session,
+                    chat_conversation_id=conv.id,
+                    call_id=open_request.call_id,
+                    status="approved" if approved else "denied",
+                )
+                if approved:
+                    # The approved tool runs on THIS resume turn but the framework does not re-emit its
+                    # function_result, so we take the captured value (the ToolExecuted output) and write
+                    # the tool_call + tool_result HERE — only when approved.
+                    tool_result_value = find_tool_result(result, open_request.function_name)
+                    await repo.add_action(
+                        session,
+                        chat_conversation_id=conv.id,
+                        user_message_id=user_msg.id,
+                        event_type="tool_call",
+                        agent_name=open_request.agent_name,
+                        tool_name=open_request.function_name,
+                        tool_kind="function",
+                        call_id=open_request.call_id,
+                        payload={"arguments": _jsonable(open_request.arguments)},
+                    )
+                    await repo.add_action(
+                        session,
+                        chat_conversation_id=conv.id,
+                        user_message_id=user_msg.id,
+                        event_type="tool_result",
+                        agent_name=open_request.agent_name,
+                        tool_name=open_request.function_name,
+                        call_id=open_request.call_id,
+                        status="ok",
+                        payload={"result": tool_result_value},
+                    )
+
+            # 5. persist transcript + actions from the run events. Assistant
             #    aistudiobot_chathistory rows land between user rows in seq order
             #    (no explicit parent link); aistudiobot_agent_actions rows soft-ref
             #    the user inbound via user_message_id. Returns {call_id -> agent_name}
@@ -214,20 +254,9 @@ async def handle_message(
                 user_message_id=user_msg.id,
             ) or {}
 
-            # 5. resolve the previous request (if any) — record the decision as an action
+            # 5b. resolve the previous request's status (order-independent — no new seq row).
             if open_request is not None:
                 if open_request.kind == "function_approval":
-                    await repo.add_action(
-                        session,
-                        chat_conversation_id=conv.id,
-                        user_message_id=user_msg.id,
-                        event_type="approval_decision",
-                        agent_name=open_request.agent_name,
-                        tool_name=open_request.function_name,
-                        call_id=open_request.call_id,
-                        status="approved" if approved else "denied",
-                        payload={"approved": approved},
-                    )
                     await repo.resolve_human_input(
                         session, open_request, "approved" if approved else "denied"
                     )
