@@ -25,7 +25,7 @@ WORKFLOW_KIND = "handoff"
 # Bumped when the executor/graph changes so stale checkpoints (a different graph signature) are never
 # matched by name. The framework would also reject them via WorkflowCheckpointException, but a fresh
 # name avoids the exception path entirely.
-_GRAPH_VERSION = 3
+_GRAPH_VERSION = 4  # bumped: added start_background_task to ae_workflow_analyzer (tool set is part of the signature)
 
 # Safety net against unbounded agent->agent ping-pong (HITL handoff has no built-in hop limit).
 # Generous because ContextAwareHandoffExecutor also adds tool-result text notes to the conversation.

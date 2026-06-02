@@ -16,6 +16,7 @@ from agents.middleware import (
     PrintLLMCallMiddleware,
     UserReplyCaptureMiddleware,
 )
+from tools.background_task import start_background_task
 from tools.file_master import list_available_files, read_file, write_file
 from tools.reply import send_reply_to_user
 from tools.ticket_master import check_existing_tickets, create_ticket
@@ -208,9 +209,13 @@ def build_handoff_agents(
             "You are the AutomationEdge MCP analyst. Only respond to direct "
             "questions; never proactively check or raise issues. If the user "
             'says "workflows" plural without naming one, use the tenant-wide '
-            "summary tools — never invent a workflowName."
+            "summary tools — never invent a workflowName. For a LONG-RUNNING "
+            "engine run that will not finish in a few seconds, call "
+            "start_background_task(task_type=..., summary=..., params=...) and "
+            "then tell the user via send_reply_to_user that it has started — do "
+            "NOT wait for it; the user will be notified when it completes."
         ),
-        tools=[ae_mcp, send_reply_to_user],
+        tools=[ae_mcp, start_background_task, send_reply_to_user],
         middleware=_middleware(
             WORKFLOW_ANALYZER, chat_conversation_id, user_message_id
         ),

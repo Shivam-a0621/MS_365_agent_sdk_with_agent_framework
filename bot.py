@@ -20,6 +20,7 @@ from microsoft_agents.hosting.core import (
     TurnContext,
     TurnState,
 )
+from microsoft_agents.hosting.core.app.proactive import ProactiveOptions
 
 from cards import approval_card
 from db.storage import PostgresStorage
@@ -37,7 +38,9 @@ STORAGE = PostgresStorage()
 CONNECTION_MANAGER = MsalConnectionManager(**_config)
 ADAPTER = CloudAdapter(connection_manager=CONNECTION_MANAGER)
 AGENT_APP = AgentApplication[TurnState](
-    storage=STORAGE, connection_manager=CONNECTION_MANAGER
+    storage=STORAGE,
+    connection_manager=CONNECTION_MANAGER,
+    proactive=ProactiveOptions(storage=STORAGE),  # enables AGENT_APP.proactive for async task delivery
 )
 
 
@@ -98,6 +101,12 @@ def _activity_to_dict(activity) -> dict:
 @AGENT_APP.activity("message")
 async def on_message(context: TurnContext, state: TurnState) -> None:
     activity = context.activity
+    # Persist the ConversationReference (keyed by conversation.id) so a later async task-completion
+    # callback can proactively message this user from outside any turn. Best-effort.
+    try:
+        await AGENT_APP.proactive.store_conversation(context)
+    except Exception:  # noqa: BLE001 - proactive bookkeeping must never break a turn
+        logger.warning("Failed to store conversation reference for proactive delivery", exc_info=True)
     result = await handle_message(
         channel=activity.channel_id or "msteams",
         conversation_ref=activity.conversation.id,

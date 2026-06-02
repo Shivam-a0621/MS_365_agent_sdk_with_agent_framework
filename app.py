@@ -19,6 +19,11 @@ from teams_channel import router as teams_router  # noqa: E402
 
 app.include_router(teams_router)
 
+# Long-running task completion callback: POST /api/task-callback (shared-secret auth).
+from task_callback import router as task_router  # noqa: E402
+
+app.include_router(task_router)
+
 
 @app.get("/")
 async def root() -> dict[str, str]:

@@ -21,8 +21,10 @@ from typing import Any
 from agent_framework.exceptions import WorkflowCheckpointException
 
 from db import repositories as repo
+from db.models import ChatConversation
 from db.session import SessionLocal
 from services.locks import conversation_lock
+from services.proactive import proactive_push
 from workflows.manager import finalize_checkpoints, run_turn
 from workflows.outcome import extract_replies, find_tool_result, is_function_approval
 from workflows.recorder import _jsonable, record_run
@@ -299,6 +301,18 @@ async def handle_message(
                 elif prim.get("request_text"):
                     result_obj.prompts.append(prim["request_text"])
 
+            # 6b. spawn any background task the agent started this turn — its OWN checkpoint lineage,
+            #     decoupled from this conversation so the user keeps chatting. It is resumed later ONLY
+            #     by /api/task-callback (never by the user's next message, because its pause is tracked
+            #     in aistudio_agent_task, not aistudiobot_agent_human_input).
+            await _spawn_background_tasks(
+                session,
+                result,
+                chat_conversation_id=conv.id,
+                channel=channel,
+                conversation_ref=conversation_ref,
+            )
+
             # 7. commit; then bound this conversation's checkpoints to {floor, latest}
             await session.commit()
             if latest_checkpoint_id:
@@ -309,3 +323,215 @@ async def handle_message(
                     completed=(not result_obj.approvals),
                 )
             return result_obj
+
+
+# ============================================================================
+# Long-running background tasks: spawn-from-a-turn + resume-from-callback.
+# ============================================================================
+
+
+async def _spawn_background_tasks(
+    session: Any,
+    result: Any,
+    *,
+    chat_conversation_id: int,
+    channel: str,
+    conversation_ref: str,
+) -> None:
+    """For each ``start_background_task`` breadcrumb in this run's tool outputs, spawn the task's OWN
+    checkpoint lineage and record an ``aistudio_agent_task`` row. Idempotent per correlation_id."""
+    from services import task_service  # lazy: avoids an import cycle at module load
+    from tools.background_task import parse_background_task
+    from workflows.handoff_orchestrator import ToolExecuted
+
+    for output in result.get_outputs():
+        if not isinstance(output, ToolExecuted):
+            continue
+        crumb = parse_background_task(output.result)
+        if crumb is None:
+            continue
+        if await repo.get_agent_task_by_correlation(session, crumb["correlation_id"]) is not None:
+            continue  # already spawned
+        await task_service.spawn_task(
+            session,
+            chat_conversation_id=chat_conversation_id,
+            channel=channel,
+            conversation_ref=conversation_ref,
+            breadcrumb=crumb,
+        )
+
+
+def _format_task_result(task: Any, task_result: Any) -> str:
+    """A short human-facing description of a finished task's outcome."""
+    if task_result is None:
+        return f"The background task '{task.task_type}' could not be completed."
+    if task_result.status == "ok":
+        return f"The background task '{task.task_type}' completed. Result: {task_result.output or {}}"
+    return f"The background task '{task.task_type}' failed: {task_result.error or task_result.status}"
+
+
+def _delivery_framing(result_text: str) -> str:
+    """The message injected into the paused conversation so the agent reports the result (merging it
+    into conversation memory). Phrased as a plain, natural notice — a bracketed imperative directive
+    ("do NOT redo …", "exactly once") trips Azure OpenAI's jailbreak/prompt-injection content filter."""
+    return (
+        f"{result_text} Please let the user know this background task has finished and share the result "
+        "with them."
+    )
+
+
+async def resume_external_task(
+    *,
+    correlation_id: str,
+    status: str = "ok",
+    output: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> bool:
+    """Resume a backgrounded task from its completion callback: load+resume the task's checkpoint,
+    merge the result into the conversation, and proactively notify the user. Idempotent — a
+    duplicate / late / unknown callback is a no-op. Returns True if it delivered, False if ignored."""
+    async with SessionLocal() as session:
+        task = await repo.get_agent_task_by_correlation(session, correlation_id)
+        if task is None or task.status != "pending":
+            logger.info("task-callback for unknown/closed task %s; ignoring", correlation_id)
+            return False
+        channel, conversation_ref = task.channel, task.conversation_ref
+
+    replies: list[str] = []
+    async with conversation_lock(f"{channel}:{conversation_ref}"):
+        async with SessionLocal() as session:
+            task = await repo.get_agent_task_by_correlation(session, correlation_id)
+            if task is None or task.status != "pending":  # re-check inside the lock (idempotency)
+                return False
+            from services import task_service  # lazy
+
+            payload = {"correlation_id": correlation_id, "status": status, "output": output or {}, "error": error}
+            task_result = await task_service.resume_task(task=task, result_payload=payload)
+            await repo.resolve_agent_task(
+                session,
+                task,
+                status="delivered" if (task_result and task_result.status == "ok") else "failed",
+                result=payload,
+            )
+            replies = await _deliver_to_conversation(
+                session,
+                chat_conversation_id=task.chat_conversation_id,
+                result_text=_format_task_result(task, task_result),
+            )
+            await session.commit()
+
+    await proactive_push(channel, conversation_ref, replies)
+    return True
+
+
+async def _deliver_to_conversation(
+    session: Any, *, chat_conversation_id: int, result_text: str
+) -> list[str]:
+    """Inject the finished-task result into the PERSISTENT conversation workflow (memory merge) and
+    return the agent's user-facing reply. Falls back to the raw result text if the conversation is not
+    sitting on a normal between-turns (handoff_user) pause."""
+    open_request = await repo.get_open_human_input(session, chat_conversation_id)
+    if open_request is None or open_request.kind != "handoff_user":
+        return [result_text]  # not on a between-turns pause (or mid-approval) -> deliver raw
+
+    conv = await session.get(ChatConversation, chat_conversation_id)
+    # anchor row for this callback "turn" (the framing text below is what actually resumes the workflow).
+    user_msg = await repo.add_chat_message(
+        session,
+        chat_session_id=conv.chat_session_id,
+        chat_conversation_id=chat_conversation_id,
+        role="user",
+        text="(background task completed)",
+        activity={"type": "event", "name": "task-callback"},
+        agent_name=None,
+    )
+    await session.commit()  # run_turn's own-session writers (checkpoint store, telemetry) must see it
+
+    try:
+        result, latest = await run_turn(
+            chat_conversation_id=chat_conversation_id,
+            user_message_id=user_msg.id,
+            text=_delivery_framing(result_text),
+            approved=False,
+            open_request=open_request,
+        )
+    except WorkflowCheckpointException:
+        await repo.resolve_human_input(session, open_request, "expired")
+        return [result_text]
+
+    result_obj = await _persist_resumed_turn(
+        session,
+        result,
+        chat_session_id=conv.chat_session_id,
+        chat_conversation_id=chat_conversation_id,
+        user_message_id=user_msg.id,
+        open_request=open_request,
+        latest_checkpoint_id=latest,
+    )
+    await session.commit()
+    if latest:
+        await finalize_checkpoints(
+            chat_conversation_id=chat_conversation_id,
+            workflow_version=1,
+            latest_checkpoint_id=latest,
+            completed=(not result_obj.approvals),
+        )
+    return result_obj.replies or [result_text]
+
+
+async def _persist_resumed_turn(
+    session: Any,
+    result: Any,
+    *,
+    chat_session_id: int,
+    chat_conversation_id: int,
+    user_message_id: int,
+    open_request: Any,
+    latest_checkpoint_id: str | None,
+) -> TurnResult:
+    """Post-run persistence for a callback-driven conversation resume. The prior pause is always a
+    handoff_user pause (no approval stamping needed); mirrors handle_message steps 5-6."""
+    approval_agents = await record_run(
+        session,
+        result,
+        chat_session_id=chat_session_id,
+        chat_conversation_id=chat_conversation_id,
+        user_message_id=user_message_id,
+    ) or {}
+    await repo.resolve_human_input(session, open_request, "answered")
+
+    result_obj = TurnResult(replies=extract_replies(result))
+    for event in result.get_request_info_events():
+        prim = _pending_primitives(event)
+        owner = approval_agents.get(prim.get("call_id"))
+        await repo.upsert_human_input(
+            session,
+            chat_conversation_id=chat_conversation_id,
+            user_message_id=user_message_id,
+            request_id=prim["request_id"],
+            kind=prim["kind"],
+            agent_name=owner,
+            function_name=prim.get("function_name"),
+            call_id=prim.get("call_id"),
+            arguments=prim.get("arguments"),
+            request_text=prim.get("request_text"),
+            checkpoint_id=latest_checkpoint_id,
+        )
+        if prim["kind"] == "function_approval":
+            await _record_approval_card_outbound(
+                session,
+                chat_session_id=chat_session_id,
+                chat_conversation_id=chat_conversation_id,
+                prim=prim,
+                owner=owner,
+            )
+            result_obj.approvals.append(
+                PendingApproval(
+                    request_id=prim["request_id"],
+                    function_name=prim.get("function_name"),
+                    arguments=prim.get("arguments"),
+                )
+            )
+        elif prim.get("request_text"):
+            result_obj.prompts.append(prim["request_text"])
+    return result_obj
