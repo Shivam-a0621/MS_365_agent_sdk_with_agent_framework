@@ -302,9 +302,8 @@ async def handle_message(
                     result_obj.prompts.append(prim["request_text"])
 
             # 6b. record any background task the agent started this turn (maps its correlation_id to
-            #     THIS conversation). The user keeps chatting normally; when the job finishes,
-            #     /api/task-callback resumes this conversation's own checkpoint with the result.
-            await _record_background_tasks(
+            #     THIS conversation). The user keeps chatting normally.
+            started_tasks = await _record_background_tasks(
                 session,
                 result,
                 chat_conversation_id=conv.id,
@@ -321,6 +320,16 @@ async def handle_message(
                     latest_checkpoint_id=latest_checkpoint_id,
                     completed=(not result_obj.approvals),
                 )
+
+            # 7b. fire each background job AFTER the commit (so its row is visible when it resumes).
+            #     The job runs in-process and resumes THIS conversation directly when done — no callback.
+            if started_tasks:
+                from services import background_runner
+
+                for crumb in started_tasks:
+                    background_runner.fire(
+                        crumb["correlation_id"], crumb.get("summary"), crumb.get("params")
+                    )
             return result_obj
 
 
@@ -336,12 +345,14 @@ async def _record_background_tasks(
     chat_conversation_id: int,
     channel: str,
     conversation_ref: str,
-) -> None:
+) -> list[dict]:
     """For each ``start_background_task`` breadcrumb in this run's tool outputs, record an
-    ``aistudio_agent_task`` row mapping its correlation_id to this conversation. Idempotent."""
+    ``aistudio_agent_task`` row mapping its correlation_id to this conversation. Idempotent. Returns
+    the breadcrumbs recorded this turn so the caller can fire their in-process jobs after commit."""
     from tools.background_task import parse_background_task
     from workflows.handoff_orchestrator import ToolExecuted
 
+    recorded: list[dict] = []
     for output in result.get_outputs():
         if not isinstance(output, ToolExecuted):
             continue
@@ -358,6 +369,8 @@ async def _record_background_tasks(
             conversation_ref=conversation_ref,
             summary=crumb.get("summary"),
         )
+        recorded.append(crumb)
+    return recorded
 
 
 def _format_task_result(summary: str | None, status: str, output: Any, error: str | None) -> str:

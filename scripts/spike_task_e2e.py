@@ -1,17 +1,11 @@
-"""End-to-end spike for the (simplified) long-running-task feature. No Teams needed.
+"""End-to-end spike for the long-running-task feature — fully automatic, no HTTP callback, no manual step.
 
-The flow it exercises:
-  1. a turn parks the conversation on its normal between-turns (handoff_user) checkpoint;
-  2. a background task is recorded for this conversation (what the agent's start_background_task does);
-  3. the user can keep chatting (the task stays pending);
-  4. after the job "runs" (a short sleep here), the completion callback (resume_external_task) loads the
-     conversation's checkpoint, the SAME agent reports the result, and it's delivered (PROACTIVE_MODE=log
-     prints it); the task row flips to delivered; a duplicate callback is ignored;
-  5. a later turn references the result (it was merged into the conversation).
+Mirrors what the live app does: record a task, then fire its in-process job; the job does the work
+(a short sleep here) and resumes THIS conversation directly when done — the same agent reports the
+result, it's merged into memory, and delivered (PROACTIVE_MODE=log prints it).
 
 Prereqs: `alembic upgrade head`; DATABASE_URL + AZURE_OPENAI_* set; AE MCP reachable.
-Run:  PROACTIVE_MODE=log TASK_SLEEP=3 python -m scripts.spike_task_e2e
-(Set TASK_SLEEP=120 to feel the real 2-minute wait.)
+Run:  PROACTIVE_MODE=log TASK_SLEEP=2 python -m scripts.spike_task_e2e
 """
 
 from __future__ import annotations
@@ -29,11 +23,12 @@ from sqlalchemy import select  # noqa: E402
 from db import repositories as repo  # noqa: E402
 from db.models import AgentTask, ChatConversation, ChatSession  # noqa: E402
 from db.session import SessionLocal  # noqa: E402
-from services.conversation_service import handle_message, resume_external_task  # noqa: E402
+from services import background_runner  # noqa: E402
+from services.conversation_service import handle_message  # noqa: E402
 
 REF = f"spike-task-{uuid.uuid4().hex[:8]}"
 CH = "rest"
-SLEEP = int(os.getenv("TASK_SLEEP", "3"))
+SLEEP = int(os.getenv("TASK_SLEEP", "2"))
 
 
 async def _conv_id() -> int:
@@ -49,42 +44,36 @@ async def _status(corr: str) -> str | None:
 
 
 async def main() -> None:
-    print(f"conversation_ref={REF}  sleep={SLEEP}s")
+    print(f"conversation_ref={REF}  work={SLEEP}s")
 
-    # 1. greeting parks the conversation on a handoff_user checkpoint.
+    # 1. greeting parks the conversation on its handoff_user checkpoint.
     await handle_message(channel=CH, conversation_ref=REF, user_id="u", user_name="T", text="hi")
     conv_id = await _conv_id()
 
-    # 2. record a background task for this conversation (what start_background_task's breadcrumb does).
+    # 2. record + fire a background task (exactly what handle_message does on a start_background_task call).
     corr = uuid.uuid4().hex
     async with SessionLocal() as s:
         await repo.create_agent_task(s, correlation_id=corr, chat_conversation_id=conv_id, channel=CH,
-                                     conversation_ref=REF, summary="Nightly Report (region=APAC)")
+                                     conversation_ref=REF, summary="Nightly Report")
         await s.commit()
-    print("recorded; status =", await _status(corr), "(expect pending)")
+    background_runner.fire(corr, "Nightly Report", {"seconds": SLEEP})
+    print("fired; status =", await _status(corr), "(expect pending)")
 
-    # 3. user keeps chatting — the task stays pending.
+    # 3. user keeps chatting while the job runs.
     r2 = await handle_message(channel=CH, conversation_ref=REF, user_id="u", user_name="T",
                               text="Thanks! In one sentence, what is an automation workflow schedule?")
     print("mid-wait turn reply:", r2.replies)
-    assert await _status(corr) == "pending", "task should still be pending while the user chats"
 
-    # 4. the job runs for a while, then calls back.
-    await asyncio.sleep(SLEEP)
-    delivered = await resume_external_task(correlation_id=corr, status="ok",
-                                           output={"rows": 128, "url": "https://example/report/42"})
-    print("callback delivered:", delivered, "| status =", await _status(corr), "(expect delivered)")
-    assert delivered and await _status(corr) == "delivered"
+    # 4. wait for the job to finish + auto-resume + report (no manual callback).
+    await asyncio.sleep(SLEEP + 18)
+    print("after work; status =", await _status(corr), "(expect delivered)")
+    assert await _status(corr) == "delivered", "job did not auto-deliver"
 
-    dup = await resume_external_task(correlation_id=corr, status="ok", output={})
-    print("duplicate callback delivered:", dup, "(expect False)")
-    assert dup is False
-
-    # 5. a later turn references the merged result.
+    # 5. later turn references the merged result.
     r3 = await handle_message(channel=CH, conversation_ref=REF, user_id="u", user_name="T",
                               text="what did my Nightly Report task return?")
     print("later-turn reply:", r3.replies)
-    print("\nOK — recorded, waited (user kept chatting), callback resumed the conversation, merged, delivered.")
+    print("\nOK — task ran in-process and resumed the conversation automatically (no callback, no manual step).")
 
 
 if __name__ == "__main__":

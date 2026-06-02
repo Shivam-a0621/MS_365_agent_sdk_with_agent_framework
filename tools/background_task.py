@@ -1,13 +1,10 @@
 """The `start_background_task` tool — kick off a long-running external job and return immediately.
 
 The agent calls this for any task that takes a while (rather than blocking on a synchronous tool).
-It does NOT run the job itself: it mints a correlation id and returns a parseable breadcrumb. The
-conversation service detects that breadcrumb after the turn, spawns the task's own checkpointed
-workflow (so the user keeps chatting), and launches the external job. When the job finishes it POSTs
-the result to /api/task-callback, which resumes the task and notifies the user.
-
-`task_type` keeps this engine-agnostic — a specific integration (e.g. an automation engine) is just
-one value.
+It mints a correlation id and returns a parseable breadcrumb. After the turn, the conversation service
+records the task and fires its in-process job (services/background_runner.py); the user keeps chatting
+on the conversation's normal checkpoint. When the job finishes it resumes that conversation directly —
+the same agent reports the result and the user is notified. No HTTP callback, no manual step.
 """
 
 import json
