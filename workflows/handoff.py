@@ -27,9 +27,11 @@ WORKFLOW_KIND = "handoff"
 # name avoids the exception path entirely.
 _GRAPH_VERSION = 4  # bumped: added start_background_task to ae_workflow_analyzer (tool set is part of the signature)
 
-# Safety net against unbounded agent->agent ping-pong (HITL handoff has no built-in hop limit).
-# Generous because ContextAwareHandoffExecutor also adds tool-result text notes to the conversation.
-MESSAGE_CAP = 40
+# Safety net against unbounded agent->agent ping-pong WITHIN a single turn (HITL handoff has no
+# built-in hop limit). This is PER-TURN, not a cap on total conversation length — _full_conversation
+# grows across turns, so a total-length cap would eventually terminate a healthy long conversation
+# (no handoff_user pause gets created -> the next message starts a fresh turn and history is lost).
+MAX_HOPS_PER_TURN = 40
 
 
 def workflow_name(conversation_id: str | int, workflow_version: int = 1) -> str:
@@ -37,8 +39,15 @@ def workflow_name(conversation_id: str | int, workflow_version: int = 1) -> str:
 
 
 def _conversation_cap_reached(conversation: list[Message]) -> bool:
-    """Termination: stop the turn once the shared conversation passes the hop cap."""
-    return len(conversation) > MESSAGE_CAP
+    """Termination: stop the turn if agents have handed off too many times SINCE the last user
+    message (a within-turn loop). Counts trailing non-user messages, so total conversation length
+    across turns does not trip it."""
+    hops = 0
+    for msg in reversed(conversation):
+        if "user" in str(getattr(msg, "role", "")).lower():
+            break  # reached the start of this turn
+        hops += 1
+    return hops > MAX_HOPS_PER_TURN
 
 
 def build_handoff_workflow(
