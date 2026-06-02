@@ -1,54 +1,35 @@
-"""Deliver a message to a conversation OUTSIDE a user turn (for async task completion).
+"""Notify a conversation OUTSIDE a user turn — used to message the user when a long-running task
+completes.
 
-PROACTIVE_MODE controls behaviour so the feature is testable locally without Bot Connector creds:
-  - ``log``  (default): just log the message — no SDK, no creds. Used for Stages 1-2.
-  - ``live``: actually push to Teams via the SDK proactive API (lazy-imports bot; needs real creds).
-  - ``echo``: like log, but also buffers into ``ECHO_SINK`` so a test/dev route can assert delivery.
-
-In ``live`` mode a send failure is logged (never raised) — but note the workflow checkpoint has
-already been consumed, so a failed push means the result is NOT redelivered. Operationally this should
-alert / write to a delivery-retry table; for now it is logged loudly.
+One flow: push the message(s) into the conversation via the SDK's proactive API. Sending from outside
+a turn needs the bot's outbound Bot Connector token, so this delivers only when the bot has real
+credentials configured (a registered/deployed bot). A send failure is logged, never raised — the task
+result is already merged into the conversation, so the user still sees it on their next message.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 
 logger = logging.getLogger("app.proactive")
 
-# In-memory sink for PROACTIVE_MODE=echo (dev/test only).
-ECHO_SINK: list[tuple[str, str]] = []
 
-
-def _mode() -> str:
-    return os.getenv("PROACTIVE_MODE", "log").lower()
-
-
-async def proactive_push(channel: str, conversation_ref: str, replies: list[str]) -> None:
-    """Send each reply to the conversation. No-op on empty."""
+async def proactive_push(conversation_ref: str, replies: list[str]) -> None:
+    """Send each reply into the conversation proactively. No-op on empty."""
     if not replies:
         return
-    mode = _mode()
+    # Lazy import: avoids constructing the SDK stack unless we actually deliver.
+    from microsoft_agents.activity import Activity
+    from bot import ADAPTER, AGENT_APP
 
-    if mode == "live":
-        from microsoft_agents.activity import Activity  # lazy: only needed for a real send
-        from bot import ADAPTER, AGENT_APP  # lazy: avoids constructing the SDK in log/echo mode
-
-        for reply in replies:
-            try:
-                await AGENT_APP.proactive.send_activity(
-                    ADAPTER, conversation_ref, Activity(type="message", text=reply)
-                )
-            except Exception:  # noqa: BLE001 - checkpoint already consumed; surface loudly, don't crash
-                logger.exception(
-                    "PROACTIVE PUSH FAILED for %s — result NOT delivered: %r", conversation_ref, reply
-                )
-        return
-
-    # log / echo — print so it's visible on stdout during testing (no logging config needed).
     for reply in replies:
-        print(f"\n📣 [proactive:{mode}] -> {conversation_ref}\n   {reply}\n")
-        logger.info("[proactive:%s] %s -> %s", mode, conversation_ref, reply)
-        if mode == "echo":
-            ECHO_SINK.append((conversation_ref, reply))
+        try:
+            await AGENT_APP.proactive.send_activity(
+                ADAPTER, conversation_ref, Activity(type="message", text=reply)
+            )
+        except Exception:  # noqa: BLE001 - needs real bot creds; the result is already in the conversation
+            logger.exception(
+                "Proactive notify failed for %s (bot credentials required); result not pushed to chat: %r",
+                conversation_ref,
+                reply,
+            )

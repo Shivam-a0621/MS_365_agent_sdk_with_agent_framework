@@ -427,7 +427,7 @@ async def resume_external_task(
             )
             await session.commit()
 
-    await proactive_push(channel, conversation_ref, replies)
+    await proactive_push(conversation_ref, replies)
     return True
 
 

@@ -2,10 +2,11 @@
 
 Mirrors what the live app does: record a task, then fire its in-process job; the job does the work
 (a short sleep here) and resumes THIS conversation directly when done — the same agent reports the
-result, it's merged into memory, and delivered (PROACTIVE_MODE=log prints it).
+result and it's merged into memory. (The proactive push needs real bot creds, so locally it logs a
+failure and we verify via the later "what did it return?" turn instead.)
 
 Prereqs: `alembic upgrade head`; DATABASE_URL + AZURE_OPENAI_* set; AE MCP reachable.
-Run:  PROACTIVE_MODE=log TASK_SLEEP=2 python -m scripts.spike_task_e2e
+Run:  TASK_SLEEP=2 python -m scripts.spike_task_e2e
 """
 
 from __future__ import annotations
