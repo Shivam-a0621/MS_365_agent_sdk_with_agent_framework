@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import (
     AgentAction,
     AgentLlmCall,
+    AgentTask,
     Bot,
     BotChannelMapping,
     Channel,
@@ -310,3 +311,85 @@ async def resolve_human_input(session: AsyncSession, row: HumanInput, status: st
     row.status = status
     row.resolved_at = _now()
     await session.flush()
+
+
+# --- long-running background tasks (aistudio_agent_task) ------------------------
+
+async def create_agent_task(
+    session: AsyncSession,
+    *,
+    correlation_id: str,
+    chat_conversation_id: int,
+    channel: str,
+    conversation_ref: str,
+    task_workflow_name: str,
+    request_id: str,
+    checkpoint_id: str | None,
+    task_type: str,
+    params: dict[str, Any] | None = None,
+    expires_at: datetime | None = None,
+) -> AgentTask:
+    """Insert one in-flight background-task row. The task's pause lives ONLY here
+    (never in aistudiobot_agent_human_input), which is what keeps it decoupled from
+    the conversation's resume routing — see AgentTask docstring."""
+    row = AgentTask(
+        correlation_id=correlation_id,
+        chat_conversation_id=chat_conversation_id,
+        channel=channel,
+        conversation_ref=conversation_ref,
+        task_workflow_name=task_workflow_name,
+        request_id=request_id,
+        checkpoint_id=checkpoint_id,
+        task_type=task_type,
+        params=params,
+        status="pending",
+        expires_at=expires_at,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_agent_task_by_correlation(
+    session: AsyncSession, correlation_id: str
+) -> AgentTask | None:
+    """Look up a task by the external correlation id (the callback key)."""
+    return (
+        await session.execute(
+            select(AgentTask).where(AgentTask.correlation_id == correlation_id)
+        )
+    ).scalar_one_or_none()
+
+
+async def resolve_agent_task(
+    session: AsyncSession,
+    row: AgentTask,
+    *,
+    status: str,
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Close a task (status in delivered | failed | expired) and stash its result."""
+    row.status = status
+    row.result = result
+    row.resolved_at = _now()
+    await session.flush()
+
+
+async def list_expired_agent_tasks(
+    session: AsyncSession, *, now: datetime | None = None
+) -> list[AgentTask]:
+    """Still-pending tasks past their expires_at — the reaper's work-list."""
+    cutoff = now or _now()
+    return list(
+        (
+            await session.execute(
+                select(AgentTask).where(
+                    AgentTask.status == "pending",
+                    AgentTask.expires_at.is_not(None),
+                    AgentTask.expires_at < cutoff,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
