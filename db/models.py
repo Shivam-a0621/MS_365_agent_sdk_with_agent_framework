@@ -320,41 +320,24 @@ class HumanInput(Base):
 # --- long-running background tasks (own checkpoint lineage, decoupled from the chat) ---
 
 class AgentTask(Base):
-    """One row per long-running background task started mid-conversation (a generic
-    external async job; the specific engine is just one `task_type`).
+    """One row per long-running background task the agent started mid-conversation.
 
-    The task runs in its OWN checkpoint lineage (`task_workflow_name`), DECOUPLED from
-    the conversation: this row is the ONLY record of the pause — it is deliberately NOT
-    written as an `aistudiobot_agent_human_input` row — so the conversation's
-    `get_open_human_input` never returns it and the user can keep chatting while it runs.
-    The external job's completion callback looks this row up by `correlation_id` and
-    resumes the task workflow from `checkpoint_id`.
+    The task does NOT get its own workflow/checkpoint — the CONVERSATION's normal between-turns
+    checkpoint is the resume point. This row just maps the external job's `correlation_id` back to
+    the conversation so the completion callback knows which conversation to resume + notify.
     """
 
     __tablename__ = "aistudio_agent_task"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    correlation_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)  # external callback key + idempotency anchor
-    chat_conversation_id: Mapped[int] = mapped_column(BigInteger, index=True)  # soft ref -> aistudiobot_chatconversation.id
+    correlation_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)  # callback key + idempotency anchor
+    chat_conversation_id: Mapped[int] = mapped_column(BigInteger, index=True)  # which conversation to resume
     channel: Mapped[str] = mapped_column(String(64))  # with conversation_ref -> conversation_lock key
     conversation_ref: Mapped[str] = mapped_column(String(150))  # agent_conversation_id (proactive push target)
-    task_workflow_name: Mapped[str] = mapped_column(String(256))  # the task's own checkpoint lineage
-    request_id: Mapped[str] = mapped_column(String(128))  # request_info id to resume against
-    checkpoint_id: Mapped[str | None] = mapped_column(String(64))  # soft ref -> aistudiobot_agent_checkpoint.checkpoint_id
-    task_type: Mapped[str] = mapped_column(String(64))  # generic kind; the engine integration is one value
-    params: Mapped[dict | None] = mapped_column(JSONB)
+    summary: Mapped[str | None] = mapped_column(Text)  # what was started (for display/logging)
     status: Mapped[str] = mapped_column(
         String(32), default="pending", server_default=text("'pending'")
-    )  # pending | delivered | failed | expired
-    result: Mapped[dict | None] = mapped_column(JSONB)
+    )  # pending | delivered | failed
+    result: Mapped[dict | None] = mapped_column(JSONB)  # the callback payload, stashed on resolution
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    __table_args__ = (
-        Index(  # reaper hot-path: find still-pending tasks past their TTL
-            "ix_aistudio_agent_task_pending",
-            "status",
-            postgresql_where=text("status = 'pending'"),
-        ),
-    )

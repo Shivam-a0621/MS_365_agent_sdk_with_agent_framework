@@ -211,9 +211,9 @@ def build_handoff_agents(
             'says "workflows" plural without naming one, use the tenant-wide '
             "summary tools — never invent a workflowName. For a LONG-RUNNING "
             "engine run that will not finish in a few seconds, call "
-            "start_background_task(task_type=..., summary=..., params=...) and "
-            "then tell the user via send_reply_to_user that it has started — do "
-            "NOT wait for it; the user will be notified when it completes."
+            "start_background_task(summary=...) and then tell the user via "
+            "send_reply_to_user that it has started — do NOT wait for it; the "
+            "user will be notified when it completes."
         ),
         tools=[ae_mcp, start_background_task, send_reply_to_user],
         middleware=_middleware(

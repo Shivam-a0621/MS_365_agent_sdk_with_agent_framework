@@ -301,11 +301,10 @@ async def handle_message(
                 elif prim.get("request_text"):
                     result_obj.prompts.append(prim["request_text"])
 
-            # 6b. spawn any background task the agent started this turn — its OWN checkpoint lineage,
-            #     decoupled from this conversation so the user keeps chatting. It is resumed later ONLY
-            #     by /api/task-callback (never by the user's next message, because its pause is tracked
-            #     in aistudio_agent_task, not aistudiobot_agent_human_input).
-            await _spawn_background_tasks(
+            # 6b. record any background task the agent started this turn (maps its correlation_id to
+            #     THIS conversation). The user keeps chatting normally; when the job finishes,
+            #     /api/task-callback resumes this conversation's own checkpoint with the result.
+            await _record_background_tasks(
                 session,
                 result,
                 chat_conversation_id=conv.id,
@@ -330,7 +329,7 @@ async def handle_message(
 # ============================================================================
 
 
-async def _spawn_background_tasks(
+async def _record_background_tasks(
     session: Any,
     result: Any,
     *,
@@ -338,9 +337,8 @@ async def _spawn_background_tasks(
     channel: str,
     conversation_ref: str,
 ) -> None:
-    """For each ``start_background_task`` breadcrumb in this run's tool outputs, spawn the task's OWN
-    checkpoint lineage and record an ``aistudio_agent_task`` row. Idempotent per correlation_id."""
-    from services import task_service  # lazy: avoids an import cycle at module load
+    """For each ``start_background_task`` breadcrumb in this run's tool outputs, record an
+    ``aistudio_agent_task`` row mapping its correlation_id to this conversation. Idempotent."""
     from tools.background_task import parse_background_task
     from workflows.handoff_orchestrator import ToolExecuted
 
@@ -351,23 +349,23 @@ async def _spawn_background_tasks(
         if crumb is None:
             continue
         if await repo.get_agent_task_by_correlation(session, crumb["correlation_id"]) is not None:
-            continue  # already spawned
-        await task_service.spawn_task(
+            continue  # already recorded
+        await repo.create_agent_task(
             session,
+            correlation_id=crumb["correlation_id"],
             chat_conversation_id=chat_conversation_id,
             channel=channel,
             conversation_ref=conversation_ref,
-            breadcrumb=crumb,
+            summary=crumb.get("summary"),
         )
 
 
-def _format_task_result(task: Any, task_result: Any) -> str:
+def _format_task_result(summary: str | None, status: str, output: Any, error: str | None) -> str:
     """A short human-facing description of a finished task's outcome."""
-    if task_result is None:
-        return f"The background task '{task.task_type}' could not be completed."
-    if task_result.status == "ok":
-        return f"The background task '{task.task_type}' completed. Result: {task_result.output or {}}"
-    return f"The background task '{task.task_type}' failed: {task_result.error or task_result.status}"
+    label = summary or "background task"
+    if status == "ok":
+        return f"The task '{label}' has completed. Result: {output or {}}"
+    return f"The task '{label}' failed: {error or status}"
 
 
 def _delivery_framing(result_text: str) -> str:
@@ -403,20 +401,16 @@ async def resume_external_task(
             task = await repo.get_agent_task_by_correlation(session, correlation_id)
             if task is None or task.status != "pending":  # re-check inside the lock (idempotency)
                 return False
-            from services import task_service  # lazy
 
-            payload = {"correlation_id": correlation_id, "status": status, "output": output or {}, "error": error}
-            task_result = await task_service.resume_task(task=task, result_payload=payload)
+            result_text = _format_task_result(task.summary, status, output, error)
+            replies = await _deliver_to_conversation(
+                session, chat_conversation_id=task.chat_conversation_id, result_text=result_text
+            )
             await repo.resolve_agent_task(
                 session,
                 task,
-                status="delivered" if (task_result and task_result.status == "ok") else "failed",
-                result=payload,
-            )
-            replies = await _deliver_to_conversation(
-                session,
-                chat_conversation_id=task.chat_conversation_id,
-                result_text=_format_task_result(task, task_result),
+                status="delivered" if status == "ok" else "failed",
+                result={"status": status, "output": output or {}, "error": error},
             )
             await session.commit()
 

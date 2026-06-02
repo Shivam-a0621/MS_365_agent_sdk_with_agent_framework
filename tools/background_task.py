@@ -23,22 +23,16 @@ BREADCRUMB_PREFIX = "__BACKGROUND_TASK__"
 
 @tool(approval_mode="never_require")
 def start_background_task(
-    task_type: Annotated[str, "The kind of long-running job to start (e.g. a workflow or report id)."],
-    summary: Annotated[str, "One short human-readable line describing what is being started."] = "",
-    params: Annotated[dict[str, Any] | None, "Parameters to pass to the job."] = None,
+    summary: Annotated[str, "One short human-readable line describing the long-running job being started."],
+    params: Annotated[dict[str, Any] | None, "Optional parameters for the job."] = None,
 ) -> str:
     """Start a long-running background job and return immediately WITHOUT waiting for it. The job runs
     asynchronously; the user will be messaged with the result when it finishes. Use this for anything
-    that takes more than a few seconds. You do NOT need to look up, validate, or fetch the workflow/job
-    first — call this directly with the task_type and any params; the system starts it and notifies the
-    user on completion. After calling this, tell the user it has started via send_reply_to_user."""
+    that takes more than a few seconds. You do NOT need to look up or validate anything first — just
+    call this with a one-line summary; the system starts it and notifies the user on completion. After
+    calling this, tell the user it has started via send_reply_to_user."""
     correlation_id = uuid.uuid4().hex
-    payload = {
-        "correlation_id": correlation_id,
-        "task_type": task_type,
-        "summary": summary,
-        "params": params or {},
-    }
+    payload = {"correlation_id": correlation_id, "summary": summary, "params": params or {}}
     return f"{BREADCRUMB_PREFIX}{json.dumps(payload)}"
 
 
