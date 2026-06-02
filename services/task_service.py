@@ -44,12 +44,19 @@ async def _noop_launcher(*, correlation_id: str, params: dict[str, Any]) -> None
 
 
 _LAUNCHERS: dict[str, Callable[..., Awaitable[None]]] = {}
+_default_launcher: Callable[..., Awaitable[None]] = _noop_launcher
 
 
 def register_launcher(task_type: str, launcher: Callable[..., Awaitable[None]]) -> None:
     """Register the function that actually kicks off the external job for a given task_type. The
     launcher MUST pass `correlation_id` to the engine so the engine echoes it back in its callback."""
     _LAUNCHERS[task_type] = launcher
+
+
+def set_default_launcher(launcher: Callable[..., Awaitable[None]]) -> None:
+    """Set the launcher used when no task_type-specific one is registered (default: no-op)."""
+    global _default_launcher
+    _default_launcher = launcher
 
 
 def _storage(chat_conversation_id: int) -> PostgresCheckpointStorage:
@@ -103,7 +110,7 @@ async def spawn_task(
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=_TTL_SECONDS),
     )
 
-    launcher = _LAUNCHERS.get(task_type, _noop_launcher)
+    launcher = _LAUNCHERS.get(task_type, _default_launcher)
     try:
         await launcher(correlation_id=correlation_id, params=params)
     except Exception:  # noqa: BLE001 - a launch failure shouldn't break the conversation turn

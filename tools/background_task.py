@@ -29,8 +29,9 @@ def start_background_task(
 ) -> str:
     """Start a long-running background job and return immediately WITHOUT waiting for it. The job runs
     asynchronously; the user will be messaged with the result when it finishes. Use this for anything
-    that takes more than a few seconds. After calling this, tell the user it has started via
-    send_reply_to_user."""
+    that takes more than a few seconds. You do NOT need to look up, validate, or fetch the workflow/job
+    first — call this directly with the task_type and any params; the system starts it and notifies the
+    user on completion. After calling this, tell the user it has started via send_reply_to_user."""
     correlation_id = uuid.uuid4().hex
     payload = {
         "correlation_id": correlation_id,

@@ -24,6 +24,9 @@ from task_callback import router as task_router  # noqa: E402
 
 app.include_router(task_router)
 
+# Register task launchers (the demo_sleep launcher becomes the default — see services/launchers.py).
+import services.launchers  # noqa: E402,F401
+
 
 @app.get("/")
 async def root() -> dict[str, str]:
