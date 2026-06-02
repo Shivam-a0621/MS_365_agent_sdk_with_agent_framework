@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from services.task_service import set_default_launcher
 
 logger = logging.getLogger("app.launchers")
 
-_DEFAULT_SECONDS = 120
+# Default sleep when the caller doesn't pass params={"seconds": N}. Override with env TASK_DEMO_SECONDS
+# (e.g. =10) so live-app testing doesn't wait the full 2 minutes.
+_DEFAULT_SECONDS = int(os.getenv("TASK_DEMO_SECONDS", "120"))
 _JOBS: set[asyncio.Task] = set()  # strong refs so detached jobs aren't garbage-collected
 
 

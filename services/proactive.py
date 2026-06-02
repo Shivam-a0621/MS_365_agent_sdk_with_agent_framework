@@ -46,8 +46,9 @@ async def proactive_push(channel: str, conversation_ref: str, replies: list[str]
                 )
         return
 
-    # log / echo
+    # log / echo — print so it's visible on stdout during testing (no logging config needed).
     for reply in replies:
+        print(f"\n📣 [proactive:{mode}] -> {conversation_ref}\n   {reply}\n")
         logger.info("[proactive:%s] %s -> %s", mode, conversation_ref, reply)
         if mode == "echo":
             ECHO_SINK.append((conversation_ref, reply))
