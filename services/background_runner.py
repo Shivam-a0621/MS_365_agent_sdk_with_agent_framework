@@ -25,7 +25,7 @@ logger = logging.getLogger("app.task")
 _JOBS: set[asyncio.Task] = set()  # strong refs so detached jobs aren't garbage-collected
 
 # Demo work duration when params don't specify "seconds". Override with env TASK_DEMO_SECONDS.
-_DEFAULT_SECONDS = int(os.getenv("TASK_DEMO_SECONDS", "120"))
+_DEFAULT_SECONDS = int(os.getenv("TASK_DEMO_SECONDS", "20"))
 
 
 async def _do_work(summary: str | None, params: dict[str, Any]) -> dict[str, Any]:
