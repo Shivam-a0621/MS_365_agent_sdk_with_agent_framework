@@ -9,7 +9,7 @@ To integrate a REAL long operation, replace the body of ``_do_work``: call your 
 compute, and return a result dict. Everything else (resume + notify) stays the same.
 
 Caveat: the job lives in this process, so a restart before it finishes loses it (the
-aistudio_agent_task row stays 'pending'). A pull/poll-based ``_do_work`` that re-checks on startup, or
+aistudiobot_agent_task row stays 'pending'). A pull/poll-based ``_do_work`` that re-checks on startup, or
 a durable job queue, would remove that limitation.
 """
 

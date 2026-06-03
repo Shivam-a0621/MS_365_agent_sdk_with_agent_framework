@@ -327,7 +327,7 @@ class AgentTask(Base):
     the conversation so the completion callback knows which conversation to resume + notify.
     """
 
-    __tablename__ = "aistudio_agent_task"
+    __tablename__ = "aistudiobot_agent_task"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     correlation_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)  # callback key + idempotency anchor

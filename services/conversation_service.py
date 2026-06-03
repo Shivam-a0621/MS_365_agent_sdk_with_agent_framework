@@ -347,7 +347,7 @@ async def _record_background_tasks(
     conversation_ref: str,
 ) -> list[dict]:
     """For each ``start_background_task`` breadcrumb in this run's tool outputs, record an
-    ``aistudio_agent_task`` row mapping its correlation_id to this conversation. Idempotent. Returns
+    ``aistudiobot_agent_task`` row mapping its correlation_id to this conversation. Idempotent. Returns
     the breadcrumbs recorded this turn so the caller can fire their in-process jobs after commit."""
     from tools.background_task import parse_background_task
     from workflows.handoff_orchestrator import ToolExecuted

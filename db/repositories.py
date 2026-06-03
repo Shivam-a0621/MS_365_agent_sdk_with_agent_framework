@@ -313,7 +313,7 @@ async def resolve_human_input(session: AsyncSession, row: HumanInput, status: st
     await session.flush()
 
 
-# --- long-running background tasks (aistudio_agent_task) ------------------------
+# --- long-running background tasks (aistudiobot_agent_task) ---------------------
 
 async def create_agent_task(
     session: AsyncSession,
