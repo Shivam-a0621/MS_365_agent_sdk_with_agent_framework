@@ -23,7 +23,7 @@ from agent_framework import Content, Message
 
 from db.checkpoint_store import PostgresCheckpointStorage
 from workflows.handoff import build_handoff_workflow, workflow_name
-from workflows.outcome import extract_replies, is_function_approval
+from workflows.handoff_orchestrator import extract_replies, is_function_approval
 
 CONV_ID = 999_001
 STATE_FILE = Path("/tmp/spike_state.json")

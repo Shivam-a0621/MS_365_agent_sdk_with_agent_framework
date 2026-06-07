@@ -24,9 +24,14 @@ from db import repositories as repo
 from db.models import ChatConversation
 from db.session import SessionLocal
 from services.locks import conversation_lock
-from services.proactive import proactive_push
+from services.background_runner import proactive_push
 from workflows.manager import finalize_checkpoints, run_turn
-from workflows.outcome import extract_replies, find_tool_result, is_function_approval
+from workflows.handoff_orchestrator import (
+    ToolExecuted,
+    extract_replies,
+    find_tool_result,
+    is_function_approval,
+)
 from workflows.recorder import _jsonable, record_run
 
 logger = logging.getLogger("app.conversation")
@@ -130,6 +135,56 @@ async def _record_approval_card_outbound(
         },
         agent_name=owner,
     )
+
+
+async def _record_new_pauses(
+    session: Any,
+    result: Any,
+    *,
+    chat_session_id: int,
+    chat_conversation_id: int,
+    user_message_id: int,
+    approval_agents: dict[str, Any],
+    latest_checkpoint_id: str | None,
+    result_obj: TurnResult,
+) -> None:
+    """Persist every NEW pause this run produced (-> aistudiobot_agent_human_input) and append its
+    user-facing shape to ``result_obj`` IN PLACE. A function_approval also writes the outbound
+    approval-card transcript row and an approval entry; a handoff_user prompt appends its text. Shared
+    by the user-turn path (handle_message step 6) and the callback-resume path (_persist_resumed_turn)."""
+    for event in result.get_request_info_events():
+        prim = _pending_primitives(event)
+        owner = approval_agents.get(prim.get("call_id"))
+        await repo.upsert_human_input(
+            session,
+            chat_conversation_id=chat_conversation_id,
+            user_message_id=user_message_id,
+            request_id=prim["request_id"],
+            kind=prim["kind"],
+            agent_name=owner,
+            function_name=prim.get("function_name"),
+            call_id=prim.get("call_id"),
+            arguments=prim.get("arguments"),
+            request_text=prim.get("request_text"),
+            checkpoint_id=latest_checkpoint_id,
+        )
+        if prim["kind"] == "function_approval":
+            await _record_approval_card_outbound(
+                session,
+                chat_session_id=chat_session_id,
+                chat_conversation_id=chat_conversation_id,
+                prim=prim,
+                owner=owner,
+            )
+            result_obj.approvals.append(
+                PendingApproval(
+                    request_id=prim["request_id"],
+                    function_name=prim.get("function_name"),
+                    arguments=prim.get("arguments"),
+                )
+            )
+        elif prim.get("request_text"):
+            result_obj.prompts.append(prim["request_text"])
 
 
 async def handle_message(
@@ -267,39 +322,16 @@ async def handle_message(
 
             # 6. record any NEW pauses -> aistudiobot_agent_human_input, build channel-neutral output
             result_obj = TurnResult(replies=extract_replies(result))
-            for event in result.get_request_info_events():
-                prim = _pending_primitives(event)
-                owner = approval_agents.get(prim.get("call_id"))
-                await repo.upsert_human_input(
-                    session,
-                    chat_conversation_id=conv.id,
-                    user_message_id=user_msg.id,
-                    request_id=prim["request_id"],
-                    kind=prim["kind"],
-                    agent_name=owner,
-                    function_name=prim.get("function_name"),
-                    call_id=prim.get("call_id"),
-                    arguments=prim.get("arguments"),
-                    request_text=prim.get("request_text"),
-                    checkpoint_id=latest_checkpoint_id,
-                )
-                if prim["kind"] == "function_approval":
-                    await _record_approval_card_outbound(
-                        session,
-                        chat_session_id=chat.id,
-                        chat_conversation_id=conv.id,
-                        prim=prim,
-                        owner=owner,
-                    )
-                    result_obj.approvals.append(
-                        PendingApproval(
-                            request_id=prim["request_id"],
-                            function_name=prim.get("function_name"),
-                            arguments=prim.get("arguments"),
-                        )
-                    )
-                elif prim.get("request_text"):
-                    result_obj.prompts.append(prim["request_text"])
+            await _record_new_pauses(
+                session,
+                result,
+                chat_session_id=chat.id,
+                chat_conversation_id=conv.id,
+                user_message_id=user_msg.id,
+                approval_agents=approval_agents,
+                latest_checkpoint_id=latest_checkpoint_id,
+                result_obj=result_obj,
+            )
 
             # 6b. record any background task the agent started this turn (maps its correlation_id to
             #     THIS conversation). The user keeps chatting normally.
@@ -350,7 +382,6 @@ async def _record_background_tasks(
     ``aistudiobot_agent_task`` row mapping its correlation_id to this conversation. Idempotent. Returns
     the breadcrumbs recorded this turn so the caller can fire their in-process jobs after commit."""
     from tools.background_task import parse_background_task
-    from workflows.handoff_orchestrator import ToolExecuted
 
     recorded: list[dict] = []
     for output in result.get_outputs():
@@ -465,6 +496,14 @@ async def _deliver_to_conversation(
     except WorkflowCheckpointException:
         await repo.resolve_human_input(session, open_request, "expired")
         return [result_text]
+    except Exception:  # noqa: BLE001 - a looped/broken resume must not crash the detached job
+        # e.g. the conversation is ping-ponging and the runner hit its hard 100-superstep cap
+        # (WorkflowConvergenceException). Deliver the raw result rather than letting this propagate
+        # up into run_background_task (where the old failed-path would re-run this and crash again).
+        logger.exception(
+            "task-delivery resume failed for conv %s; delivering raw result", chat_conversation_id
+        )
+        return [result_text]
 
     result_obj = await _persist_resumed_turn(
         session,
@@ -508,37 +547,14 @@ async def _persist_resumed_turn(
     await repo.resolve_human_input(session, open_request, "answered")
 
     result_obj = TurnResult(replies=extract_replies(result))
-    for event in result.get_request_info_events():
-        prim = _pending_primitives(event)
-        owner = approval_agents.get(prim.get("call_id"))
-        await repo.upsert_human_input(
-            session,
-            chat_conversation_id=chat_conversation_id,
-            user_message_id=user_message_id,
-            request_id=prim["request_id"],
-            kind=prim["kind"],
-            agent_name=owner,
-            function_name=prim.get("function_name"),
-            call_id=prim.get("call_id"),
-            arguments=prim.get("arguments"),
-            request_text=prim.get("request_text"),
-            checkpoint_id=latest_checkpoint_id,
-        )
-        if prim["kind"] == "function_approval":
-            await _record_approval_card_outbound(
-                session,
-                chat_session_id=chat_session_id,
-                chat_conversation_id=chat_conversation_id,
-                prim=prim,
-                owner=owner,
-            )
-            result_obj.approvals.append(
-                PendingApproval(
-                    request_id=prim["request_id"],
-                    function_name=prim.get("function_name"),
-                    arguments=prim.get("arguments"),
-                )
-            )
-        elif prim.get("request_text"):
-            result_obj.prompts.append(prim["request_text"])
+    await _record_new_pauses(
+        session,
+        result,
+        chat_session_id=chat_session_id,
+        chat_conversation_id=chat_conversation_id,
+        user_message_id=user_message_id,
+        approval_agents=approval_agents,
+        latest_checkpoint_id=latest_checkpoint_id,
+        result_obj=result_obj,
+    )
     return result_obj

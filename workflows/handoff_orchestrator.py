@@ -24,6 +24,10 @@ inherited unchanged. The ``_run_agent_and_emit`` override below is a FAITHFUL CO
 framework body (``agent_framework_orchestrations._handoff.HandoffAgentExecutor``, pinned to
 ``==1.0.0rc1``) with only the reply-surfacing/broadcast block inserted — re-diff against the framework
 on any upgrade.
+
+This module also owns the run-output extractors at the bottom (``extract_replies`` /
+``find_tool_result`` / ``is_function_approval``) — the readers of the UserReply/ToolExecuted outputs
+emitted here — so producer and reader live together.
 """
 
 from __future__ import annotations
@@ -53,7 +57,7 @@ logger = logging.getLogger("app.handoff")
 @dataclass
 class UserReply:
     """A user-visible reply emitted by an agent via ``send_reply_to_user``, yielded as a workflow
-    output. ``workflows.outcome.extract_replies`` surfaces these (and ONLY these) to the user; the
+    output. ``extract_replies`` (below) surfaces these (and ONLY these) to the user; the
     recorder safely ignores them (no ``.messages``)."""
 
     agent: str
@@ -109,7 +113,19 @@ class ContextAwareHandoffExecutor(HandoffAgentExecutor):
 
         self._full_conversation.extend(self._cache.copy())
 
+        # Within-turn handoff loop hit the cap (see MAX_HOPS_PER_TURN). In a ping-pong the agent
+        # hands off and returns at the handoff block below BEFORE reaching the post-response check,
+        # so THIS start-of-run check is where a loop is caught. Stop cleanly with a user-facing notice
+        # instead of the base class's silent return (which would leave the user hanging). We
+        # intentionally do NOT open a resume pause here: the looped _full_conversation is
+        # bloated/confused, so letting the next user message start a fresh turn resets it (a healthy
+        # turn converges to its own handoff_user pause far below the cap and never reaches this).
         if await self._should_terminate():
+            await self._surface(
+                ["I couldn't finish that request — could you rephrase it or break it into smaller steps?"],
+                ctx,
+                broadcast=False,
+            )
             return
 
         if ctx.is_streaming():
@@ -257,3 +273,49 @@ class ContextAwareHandoffBuilder(HandoffBuilder):
                 autonomous_mode_turn_limit=self._autonomous_mode_turn_limits.get(id, None),
             )
         return executors
+
+
+# --- run-output extractors (read back what the executor above emitted) ----------------------------
+# These turn one workflow run into channel-neutral values for the service layer. They live here, next
+# to the UserReply/ToolExecuted producers, so producer + reader are one module (no import cycle to
+# dodge). NOTE: resume-value reconstruction lives in workflows/manager.py (_resume_value) — it works off
+# a stored HumanInput row (cross-process resume), not a live run, so it stays separate.
+
+
+def extract_replies(result: Any) -> list[str]:
+    """User-visible replies = the ``send_reply_to_user`` outputs ONLY (the UserReply outputs emitted by
+    ``_surface``), in emission order, de-duplicated. The framework also yields each agent's implicit
+    AgentResponse as an output event; we deliberately skip those — send_reply_to_user is the sole
+    user-reply channel.
+
+    De-dup safety net: in a handoff mesh a receiving agent sometimes RESTATES a result another agent
+    already reported (it sees the "[other_agent] …" note and parrots it as plain text, which the
+    executor's fallback then surfaces). Identical replies are collapsed by whitespace-normalized text so
+    the user never sees the same answer twice, regardless of how the models route."""
+    replies: list[str] = []
+    seen: set[str] = set()
+    for output in result.get_outputs():
+        if isinstance(output, UserReply) and output.text:
+            key = " ".join(output.text.split())  # normalize whitespace for the comparison only
+            if key in seen:
+                continue
+            seen.add(key)
+            replies.append(output.text)
+    return replies
+
+
+def find_tool_result(result: Any, tool_name: str | None) -> str | None:
+    """Return the captured result of the executed tool named ``tool_name`` from this run's ToolExecuted
+    outputs, or None. Used by the service to write the ``tool_result`` audit row on an approval RESUME
+    (the framework runs the approved tool but does not re-emit its function_result)."""
+    if not tool_name:
+        return None
+    for output in result.get_outputs():
+        if isinstance(output, ToolExecuted) and output.tool == tool_name:
+            return output.result
+    return None
+
+
+def is_function_approval(event: Any) -> bool:
+    """True if a request_info event is a tool/function approval request."""
+    return getattr(getattr(event, "data", None), "type", None) == "function_approval_request"

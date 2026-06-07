@@ -23,7 +23,7 @@ load_dotenv()  # load AZURE_OPENAI_* / AE_MCP_URL from .env before building the 
 from agent_framework import InMemoryCheckpointStorage, Message  # noqa: E402
 
 from workflows.handoff import build_handoff_workflow  # noqa: E402
-from workflows.outcome import extract_replies, is_function_approval  # noqa: E402
+from workflows.handoff_orchestrator import extract_replies, is_function_approval  # noqa: E402
 
 
 def _short(v: object, n: int = 240) -> str:
