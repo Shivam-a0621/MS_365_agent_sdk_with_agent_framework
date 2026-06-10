@@ -2,8 +2,7 @@
 
 No in-memory state: each turn rebuilds the workflow (deterministic graph signature)
 with a Postgres-backed checkpoint store and runs fresh or resumes from the durable
-checkpoint. Function-approval resume is reconstructed from the stored HumanInput
-primitives (no live event needed), so it works across restarts / workers.
+checkpoint. Function-approval resume is reconstructed from the stored HumanInput so it works across restarts / workers.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ async def run_turn(
     open_request: HumanInput | None,
 ) -> tuple[Any, str | None]:
     """Run one turn. Fresh when there's no open request; otherwise resume it.
-
+handle_message
     Returns (run_result, latest_checkpoint_id). May raise WorkflowCheckpointException
     if the graph changed since the checkpoint (caller handles -> restart conversation).
     """

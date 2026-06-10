@@ -107,7 +107,7 @@ class ContextAwareHandoffExecutor(HandoffAgentExecutor):
     """
 
     async def _run_agent_and_emit(self, ctx: WorkflowContext[Any, Any]) -> None:
-        # First run: broadcast the initial cache to all other agents (start agent only).
+        # First run: broadcast the initial cache to all other agents .
         if self._is_start_agent and not self._full_conversation:
             await self._broadcast_messages(self._cache.copy(), ctx)
 

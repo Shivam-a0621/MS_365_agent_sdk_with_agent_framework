@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug simple_agent (aiohttp)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/agent-testing/simple_agent.py",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Debug directline_demo (aiohttp)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/agent-testing/directline_demo.py",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

@@ -36,7 +36,7 @@ _config = load_configuration_from_env(environ)
 # swap for a Redis-backed Storage here when needed (same SDK Storage interface).
 STORAGE = PostgresStorage()
 CONNECTION_MANAGER = MsalConnectionManager(**_config)
-ADAPTER = CloudAdapter(connection_manager=CONNECTION_MANAGER)
+ADAPTER = CloudAdapter(connection_manager=CONNECTION_MANAGER)  # check it for aiohttp.
 AGENT_APP = AgentApplication[TurnState](
     storage=STORAGE,
     connection_manager=CONNECTION_MANAGER,
