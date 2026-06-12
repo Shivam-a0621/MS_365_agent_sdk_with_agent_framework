@@ -22,7 +22,7 @@ from microsoft_agents.hosting.core import (
 )
 from microsoft_agents.hosting.core.app.proactive import ProactiveOptions
 
-from cards import approval_card
+from cards import approval_card, workflow_search_card
 from db.storage import PostgresStorage
 from services.conversation_service import handle_message
 
@@ -126,7 +126,11 @@ async def on_message(context: TurnContext, state: TurnState) -> None:
                 approval.request_id, approval.function_name, approval.arguments
             )
         )
-    if not (result.replies or result.prompts or result.approvals):
+    if result.workflow_choices:
+        await context.send_activity(workflow_search_card(result.workflow_choices))
+    if not (
+        result.replies or result.prompts or result.approvals or result.workflow_choices
+    ):
         await context.send_activity("(no reply)")
 
 

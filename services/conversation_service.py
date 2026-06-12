@@ -52,6 +52,7 @@ class TurnResult:
     replies: list[str] = field(default_factory=list)
     approvals: list[PendingApproval] = field(default_factory=list)
     prompts: list[str] = field(default_factory=list)  # non-approval prompts
+    workflow_choices: list[str] = field(default_factory=list)  # if set, bot renders a typed-search picker
     error: str | None = None
 
 
@@ -198,6 +199,10 @@ async def handle_message(
     activity: dict | None = None,
     workflow_version: int = 1,
 ) -> TurnResult:
+    # A workflow-picker card submit arrives as a message with empty text and value={"workflowChoice": name}.
+    # Treat the picked name as this turn's message, so the paused (handoff_user) conversation resumes with it.
+    if not text and isinstance(value, dict) and value.get("workflowChoice"):
+        text = str(value["workflowChoice"])
     async with conversation_lock(f"{channel}:{conversation_ref}"):
         async with SessionLocal() as session:
             # 1. identity: bot/channel mapping -> session -> conversation
@@ -322,6 +327,10 @@ async def handle_message(
 
             # 6. record any NEW pauses -> aistudiobot_agent_human_input, build channel-neutral output
             result_obj = TurnResult(replies=extract_replies(result))
+            # If the analyzer called show_workflow_picker this run, carry the workflow names so the bot
+            # renders a typed-search card (the turn ends on the normal handoff_user pause; the user's pick
+            # resumes it with the exact name — see the workflowChoice mapping at the top of this fn).
+            result_obj.workflow_choices = _workflow_picker_choices(result)
             await _record_new_pauses(
                 session,
                 result,
@@ -368,6 +377,18 @@ async def handle_message(
 # ============================================================================
 # Long-running background tasks: spawn-from-a-turn + resume-from-callback.
 # ============================================================================
+
+
+def _workflow_picker_choices(result: Any) -> list[str]:
+    """The workflow names from a show_workflow_picker breadcrumb in this run's tool outputs, or []."""
+    from tools.workflow_picker import parse_workflow_picker
+
+    for output in result.get_outputs():
+        if isinstance(output, ToolExecuted):
+            names = parse_workflow_picker(output.result)
+            if names is not None:
+                return names
+    return []
 
 
 async def _record_background_tasks(

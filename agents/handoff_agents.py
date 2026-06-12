@@ -20,6 +20,7 @@ from tools.background_task import start_background_task
 from tools.file_master import list_available_files, read_file, write_file
 from tools.reply import send_reply_to_user
 from tools.ticket_master import check_existing_tickets, create_ticket
+from tools.workflow_picker import show_workflow_picker
 
 # Stable ids — also used as handoff targets.
 TRIAGE = "triage_agent"
@@ -207,15 +208,21 @@ def build_handoff_agents(
         ),
         instructions=_role(
             "You are the AutomationEdge MCP analyst. Only respond to direct "
-            "questions; never proactively check or raise issues. If the user "
-            'says "workflows" plural without naming one, use the tenant-wide '
-            "summary tools — never invent a workflowName. For a LONG-RUNNING "
+            "questions; never proactively check or raise issues. When a tool "
+            "needs an EXACT workflowName the user has NOT given precisely (they "
+            "say 'the invoice one', a partial name, or none), do NOT guess or "
+            "invent one: FIRST call list_workflows (pass the user's hint as "
+            "nameContains if they gave one, otherwise list them all) to get the "
+            "names, THEN call show_workflow_picker(workflow_names=[...the exact "
+            "names from that result...]) and STOP — do not hand off, do not call "
+            "other tools; the user picks from a typed-search card and your next "
+            "turn continues with the exact name they choose. For a LONG-RUNNING "
             "engine run that will not finish in a few seconds, call "
             "start_background_task(summary=...) and then tell the user via "
             "send_reply_to_user that it has started — do NOT wait for it; the "
             "user will be notified when it completes."
         ),
-        tools=[ae_mcp, start_background_task, send_reply_to_user],
+        tools=[ae_mcp, start_background_task, send_reply_to_user, show_workflow_picker],
         middleware=_middleware(
             WORKFLOW_ANALYZER, chat_conversation_id, user_message_id
         ),
